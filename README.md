@@ -4,7 +4,7 @@ A Slack bot that uses Gemini AI with tool-calling to answer questions — pullin
 
 ## How it works
 
-1. Mention the bot in Slack (`@agent-brad your question`)
+1. Mention the bot in Slack (`@agent-bread your question`)
 2. The bot reacts with 👀 immediately
 3. Gemini decides whether the question requires a Notion lookup or can be answered directly
 4. If Notion is needed, all connected databases are queried and the results are fed back to Gemini

@@ -63,20 +63,24 @@ def markdown_to_slack(text: str) -> str:
     return text
 
 
-notion_tool = {
-    "name": "search_notion",
-    "description": (
-        "Retrieves data from the user's Notion workspace databases. "
-        "Call this tool ONLY when the user is asking about information that is likely stored in Notion, "
-        "such as tasks, projects, notes, team info, schedules, or anything workspace-related. "
-        "Do NOT call this for general conversation, greetings, or questions answerable from general knowledge."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
+notion_tool = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="search_notion",
+            description=(
+                "Retrieves data from the user's Notion workspace databases. "
+                "Call this tool ONLY when the user is asking about information that is likely stored in Notion, "
+                "such as tasks, projects, notes, team info, schedules, or anything workspace-related. "
+                "Do NOT call this for general conversation, greetings, or questions answerable from general knowledge."
+            ),
+            parameters=genai_types.Schema(type=genai_types.Type.OBJECT, properties={}),
+        )
+    ]
+)
+notion_tool_config = genai_types.GenerateContentConfig(tools=[notion_tool])
+google_search_config = genai_types.GenerateContentConfig(
+    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+)
 
 @app.event("app_mention")
 def handle_mention(event, say, client):
@@ -89,14 +93,14 @@ def handle_mention(event, say, client):
     client.reactions_add(channel=channel, name="eyes", timestamp=event["ts"])
 
     try:
-        print("[Gemini] First pass — deciding whether to call Notion tool...")
+        # Pass 1: function declarations only — decide if Notion is needed
+        print("[Gemini] Pass 1 — checking if Notion lookup is needed...")
         response = gemini.models.generate_content(
             model='gemini-3.1-flash-lite-preview',
             contents=user_query,
-            config={"tools": [{"function_declarations": [notion_tool]}]},
+            config=notion_tool_config,
         )
 
-        # Check if Gemini decided to call our Notion tool
         tool_call = None
         candidates = response.candidates or []
         for part in (candidates[0].content.parts if candidates and candidates[0].content else []):  # type: ignore[union-attr]
@@ -105,30 +109,27 @@ def handle_mention(event, say, client):
                 break
 
         if tool_call:
-            print("[Gemini] Tool call requested: search_notion")
+            print("[Gemini] Notion lookup triggered, fetching data...")
             notion_data = search_and_get_notion_data()
-
-            # Second pass: echo original model content back (preserves thought_signature)
-            print("[Gemini] Second pass — generating answer with Notion data...")
-            tool_result = genai_types.Part.from_function_response(
-                name="search_notion",
-                response={"content": notion_data},
+            context_prompt = (
+                f"The user asked: {user_query}\n\n"
+                f"Here is the relevant data from their Notion workspace:\n{notion_data}\n\n"
+                "Answer the user's question using this data. If you need more detail than Notion provides, "
+                "use Google Search to supplement."
             )
-            final_response = gemini.models.generate_content(
-                model='gemini-3.1-flash-lite-preview',
-                contents=[
-                    genai_types.Content(role="user", parts=[genai_types.Part(text=user_query)]),
-                    candidates[0].content,
-                    genai_types.Content(role="tool", parts=[tool_result]),
-                ],
-                config={"tools": [{"function_declarations": [notion_tool]}]},
-            )
-            print("[Gemini] Response received, sending to Slack")
-            say(text=markdown_to_slack(final_response.text or ""), thread_ts=thread_ts)
         else:
-            # No tool call — Gemini answered directly
-            print("[Gemini] No tool call needed, responding directly")
-            say(text=markdown_to_slack(response.text or ""), thread_ts=thread_ts)
+            print("[Gemini] No Notion needed, going straight to answer...")
+            context_prompt = user_query
+
+        # Pass 2: google_search only — generate the final answer
+        print("[Gemini] Pass 2 — generating final answer...")
+        final_response = gemini.models.generate_content(
+            model='gemini-3.1-flash-lite-preview',
+            contents=context_prompt,
+            config=google_search_config,
+        )
+        print("[Gemini] Response received, sending to Slack")
+        say(text=markdown_to_slack(final_response.text or ""), thread_ts=thread_ts)
 
     except Exception as e:
         say(text=f"Error: {str(e)}", thread_ts=thread_ts)
